@@ -1,7 +1,500 @@
 <!DOCTYPE html>
+<html lang="ko">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGL 간단한 슈팅 게임</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+            background-color: #121212;
+        }
+        canvas {
+            display: block;
+            margin: 0 auto;
+            background-color: #000;
+        }
+        .ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 18px;
+            z-index: 100;
+        }
+        .game-over {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 36px;
+            text-align: center;
+            display: none;
+            z-index: 200;
+        }
+        button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 10px 20px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 10px 2px;
+            cursor: pointer;
+            border-radius: 5px;
+        }
+    </style>
 </head>
 <body>
-    <h1>Hello World</h1>
+    <div class="ui">
+        <div>점수: <span id="score">0</span></div>
+        <div>남은 시간: <span id="time">30</span>초</div>
+    </div>
+    <div class="game-over" id="gameOver">
+        <h2>게임 종료!</h2>
+        <p>최종 점수: <span id="finalScore">0</span></p>
+        <button id="restartBtn">다시 시작</button>
+    </div>
+    <canvas id="game"></canvas>
+
+    <script>
+        // 게임 상태 변수
+        const state = {
+            score: 0,
+            timeLeft: 30,
+            gameOver: false,
+            targets: [],
+            nextTargetTime: 0
+        };
+
+        // DOM 요소
+        const canvas = document.getElementById('game');
+        const scoreElement = document.getElementById('score');
+        const timeElement = document.getElementById('time');
+        const gameOverElement = document.getElementById('gameOver');
+        const finalScoreElement = document.getElementById('finalScore');
+        const restartBtn = document.getElementById('restartBtn');
+
+        // 캔버스 설정
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        const gl = canvas.getContext('webgl');
+
+        if (!gl) {
+            alert('WebGL을 지원하지 않는 브라우저입니다.');
+            throw new Error('WebGL을 지원하지 않는 브라우저입니다.');
+        }
+
+        // 버텍스 셰이더 코드
+        const vsSource = `
+            attribute vec4 aVertexPosition;
+            attribute vec4 aVertexColor;
+            
+            uniform mat4 uModelViewMatrix;
+            uniform mat4 uProjectionMatrix;
+            
+            varying lowp vec4 vColor;
+            
+            void main() {
+                gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+                vColor = aVertexColor;
+            }
+        `;
+
+        // 프래그먼트 셰이더 코드
+        const fsSource = `
+            varying lowp vec4 vColor;
+            
+            void main() {
+                gl_FragColor = vColor;
+            }
+        `;
+
+        // 셰이더 프로그램 생성 함수
+        function initShaderProgram(gl, vsSource, fsSource) {
+            const vertexShader = loadShader(gl, gl.VERTEX_SHADER, vsSource);
+            const fragmentShader = loadShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+            const shaderProgram = gl.createProgram();
+            gl.attachShader(shaderProgram, vertexShader);
+            gl.attachShader(shaderProgram, fragmentShader);
+            gl.linkProgram(shaderProgram);
+
+            if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+                alert('셰이더 프로그램 초기화 실패');
+                return null;
+            }
+
+            return shaderProgram;
+        }
+
+        // 셰이더 로드 함수
+        function loadShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                alert('셰이더 컴파일 오류: ' + gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+
+            return shader;
+        }
+
+        // 셰이더 프로그램 초기화
+        const shaderProgram = initShaderProgram(gl, vsSource, fsSource);
+        
+        // 셰이더 프로그램 정보
+        const programInfo = {
+            program: shaderProgram,
+            attribLocations: {
+                vertexPosition: gl.getAttribLocation(shaderProgram, 'aVertexPosition'),
+                vertexColor: gl.getAttribLocation(shaderProgram, 'aVertexColor'),
+            },
+            uniformLocations: {
+                projectionMatrix: gl.getUniformLocation(shaderProgram, 'uProjectionMatrix'),
+                modelViewMatrix: gl.getUniformLocation(shaderProgram, 'uModelViewMatrix'),
+            },
+        };
+
+        // 투영 행렬 생성
+        function createProjectionMatrix() {
+            const fieldOfView = 45 * Math.PI / 180;
+            const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
+            const zNear = 0.1;
+            const zFar = 100.0;
+            const projectionMatrix = mat4.create();
+            
+            mat4.perspective(projectionMatrix, fieldOfView, aspect, zNear, zFar);
+            
+            return projectionMatrix;
+        }
+
+        // 타겟 클래스
+        class Target {
+            constructor() {
+                this.position = [
+                    Math.random() * (canvas.width - 100) + 50,
+                    Math.random() * (canvas.height - 100) + 50
+                ];
+                this.size = Math.random() * 30 + 20;
+                this.color = [
+                    Math.random(),
+                    Math.random(),
+                    Math.random(),
+                    1.0
+                ];
+                this.points = Math.floor(30 / this.size * 10);
+                this.speed = Math.random() * 2 + 1;
+                this.direction = Math.random() * Math.PI * 2;
+                this.lifeTime = Math.random() * 3 + 2;
+                this.createdAt = performance.now() / 1000;
+            }
+            
+            update(deltaTime) {
+                this.position[0] += Math.cos(this.direction) * this.speed * deltaTime;
+                this.position[1] += Math.sin(this.direction) * this.speed * deltaTime;
+                
+                // 경계 체크
+                if (this.position[0] < 0 || this.position[0] > canvas.width) {
+                    this.direction = Math.PI - this.direction;
+                }
+                if (this.position[1] < 0 || this.position[1] > canvas.height) {
+                    this.direction = -this.direction;
+                }
+                
+                // 수명 체크
+                const currentTime = performance.now() / 1000;
+                return (currentTime - this.createdAt) < this.lifeTime;
+            }
+            
+            isClicked(x, y) {
+                const dx = this.position[0] - x;
+                const dy = this.position[1] - y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                return distance <= this.size;
+            }
+            
+            draw(gl, projectionMatrix) {
+                // 타겟을 그릴 버퍼 생성
+                const positions = [];
+                const colors = [];
+                const indices = [];
+                
+                // 원 생성
+                const segments = 12;
+                positions.push(0, 0, 0);
+                colors.push(...this.color);
+                
+                for (let i = 0; i <= segments; i++) {
+                    const theta = (i / segments) * Math.PI * 2;
+                    const x = Math.cos(theta) * this.size;
+                    const y = Math.sin(theta) * this.size;
+                    positions.push(x, y, 0);
+                    colors.push(...this.color);
+                    
+                    if (i > 0) {
+                        indices.push(0, i, i + 1);
+                    }
+                }
+                
+                // 버퍼 생성 및 바인딩
+                const positionBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+                
+                const colorBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+                
+                const indexBuffer = gl.createBuffer();
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+                gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+                
+                // 모델뷰 행렬 설정
+                const modelViewMatrix = mat4.create();
+                mat4.translate(modelViewMatrix, modelViewMatrix, [this.position[0], this.position[1], -50]);
+                
+                // 셰이더 프로그램 사용
+                gl.useProgram(programInfo.program);
+                
+                // 버텍스 위치 설정
+                gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+                gl.vertexAttribPointer(
+                    programInfo.attribLocations.vertexPosition,
+                    3,
+                    gl.FLOAT,
+                    false,
+                    0,
+                    0
+                );
+                gl.enableVertexAttribArray(programInfo.attribLocations.vertexPosition);
+                
+                // 버텍스 색상 설정
+                gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+                gl.vertexAttribPointer(
+                    programInfo.attribLocations.vertexColor,
+                    4,
+                    gl.FLOAT,
+                    false,
+                    0,
+                    0
+                );
+                gl.enableVertexAttribArray(programInfo.attribLocations.vertexColor);
+                
+                // 인덱스 설정
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+                
+                // 투영 및 모델뷰 행렬 설정
+                gl.uniformMatrix4fv(
+                    programInfo.uniformLocations.projectionMatrix,
+                    false,
+                    projectionMatrix
+                );
+                gl.uniformMatrix4fv(
+                    programInfo.uniformLocations.modelViewMatrix,
+                    false,
+                    modelViewMatrix
+                );
+                
+                // 그리기
+                gl.drawElements(gl.TRIANGLES, indices.length, gl.UNSIGNED_SHORT, 0);
+                
+                // 버퍼 정리
+                gl.deleteBuffer(positionBuffer);
+                gl.deleteBuffer(colorBuffer);
+                gl.deleteBuffer(indexBuffer);
+            }
+        }
+
+        // 게임 초기화
+        function initGame() {
+            state.score = 0;
+            state.timeLeft = 30;
+            state.gameOver = false;
+            state.targets = [];
+            state.nextTargetTime = 0;
+            
+            scoreElement.textContent = state.score;
+            timeElement.textContent = state.timeLeft;
+            gameOverElement.style.display = 'none';
+            
+            // 게임 타이머 시작
+            startGameTimer();
+        }
+
+        // 게임 타이머
+        function startGameTimer() {
+            const timerInterval = setInterval(() => {
+                state.timeLeft--;
+                timeElement.textContent = state.timeLeft;
+                
+                if (state.timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    endGame();
+                }
+            }, 1000);
+        }
+
+        // 게임 종료
+        function endGame() {
+            state.gameOver = true;
+            finalScoreElement.textContent = state.score;
+            gameOverElement.style.display = 'block';
+        }
+
+        // 마우스 클릭 처리
+        canvas.addEventListener('click', (event) => {
+            if (state.gameOver) return;
+            
+            const rect = canvas.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            
+            for (let i = state.targets.length - 1; i >= 0; i--) {
+                if (state.targets[i].isClicked(x, y)) {
+                    state.score += state.targets[i].points;
+                    scoreElement.textContent = state.score;
+                    state.targets.splice(i, 1);
+                    break;
+                }
+            }
+        });
+
+        // 리사이즈 처리
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        });
+
+        // 다시 시작 버튼 이벤트
+        restartBtn.addEventListener('click', () => {
+            initGame();
+        });
+
+        // 게임 루프
+        let lastTime = 0;
+        function gameLoop(currentTime) {
+            const deltaTime = (currentTime - lastTime) / 1000;
+            lastTime = currentTime;
+            
+            if (!state.gameOver) {
+                // 타겟 업데이트
+                for (let i = state.targets.length - 1; i >= 0; i--) {
+                    if (!state.targets[i].update(deltaTime)) {
+                        state.targets.splice(i, 1);
+                    }
+                }
+                
+                // 새로운 타겟 생성
+                if (currentTime >= state.nextTargetTime) {
+                    state.targets.push(new Target());
+                    state.nextTargetTime = currentTime + Math.random() * 500 + 300;
+                }
+                
+                // 그리기
+                gl.clearColor(0.0, 0.0, 0.0, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                
+                // 투영 행렬 설정
+                const projectionMatrix = createProjectionMatrix();
+                
+                // 월드 좌표를 화면 좌표로 변환하는 행렬
+                const screenMatrix = mat4.create();
+                mat4.ortho(
+                    screenMatrix,
+                    0, canvas.width,
+                    canvas.height, 0,
+                    -100, 100
+                );
+                
+                // 타겟 그리기
+                for (const target of state.targets) {
+                    target.draw(gl, screenMatrix);
+                }
+            }
+            
+            requestAnimationFrame(gameLoop);
+        }
+
+        // mat4 라이브러리 (glMatrix)
+        const mat4 = {
+            create: function() {
+                return new Float32Array([
+                    1, 0, 0, 0,
+                    0, 1, 0, 0,
+                    0, 0, 1, 0,
+                    0, 0, 0, 1
+                ]);
+            },
+            
+            perspective: function(out, fovy, aspect, near, far) {
+                const f = 1.0 / Math.tan(fovy / 2);
+                out[0] = f / aspect;
+                out[1] = 0;
+                out[2] = 0;
+                out[3] = 0;
+                out[4] = 0;
+                out[5] = f;
+                out[6] = 0;
+                out[7] = 0;
+                out[8] = 0;
+                out[9] = 0;
+                out[10] = -(far + near) / (far - near);
+                out[11] = -1;
+                out[12] = 0;
+                out[13] = 0;
+                out[14] = -(2 * far * near) / (far - near);
+                out[15] = 0;
+                return out;
+            },
+            
+            ortho: function(out, left, right, bottom, top, near, far) {
+                const lr = 1 / (left - right);
+                const bt = 1 / (bottom - top);
+                const nf = 1 / (near - far);
+                out[0] = -2 * lr;
+                out[1] = 0;
+                out[2] = 0;
+                out[3] = 0;
+                out[4] = 0;
+                out[5] = -2 * bt;
+                out[6] = 0;
+                out[7] = 0;
+                out[8] = 0;
+                out[9] = 0;
+                out[10] = 2 * nf;
+                out[11] = 0;
+                out[12] = (left + right) * lr;
+                out[13] = (top + bottom) * bt;
+                out[14] = (far + near) * nf;
+                out[15] = 1;
+                return out;
+            },
+            
+            translate: function(out, a, v) {
+                const x = v[0], y = v[1], z = v[2];
+                
+                out[12] = a[0] * x + a[4] * y + a[8] * z + a[12];
+                out[13] = a[1] * x + a[5] * y + a[9] * z + a[13];
+                out[14] = a[2] * x + a[6] * y + a[10] * z + a[14];
+                out[15] = a[3] * x + a[7] * y + a[11] * z + a[15];
+                
+                return out;
+            }
+        };
+
+        // 게임 시작
+        initGame();
+        requestAnimationFrame(gameLoop);
+    </script>
 </body>
 </html>
